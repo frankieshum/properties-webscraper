@@ -1,35 +1,52 @@
-from types import TracebackType
 from bs4 import BeautifulSoup
 from urllib.request import urlopen
 import sys
+import traceback
+
+ZOOPLA_BASE_URL = 'https://www.zoopla.co.uk'
+
+class Property:
+    def __init__(self, title, address, price, listed_date):
+        self.title = title
+        self.address = address
+        self.price = price
+        self.listed_date = listed_date
+
+    def format_details(self):
+        return f'{self.title}\n{self.address}\n{self.price}\n{self.listed_date}\n'
+
 
 def main():
     try:
         while True:
-            url = input('Enter a Rightmove.co.uk search URL: ')
-            html = get_html_from_url(url)
-            soup_results = get_properties_from_html(html)
-            list_properties(soup_results)
-
-            if input('Press enter to search again (or type "q" to quit)') == 'q':
+            url = input('Enter a zoopla.co.uk search URL: ')
+            get_and_list_properties(url)
+            if input('Press enter to search again (or type "q" to quit): ') == 'q':
                 break
     except Exception as err:
-        print(f'An error occurred! Details: "{err}", Traceback: {TracebackType.format_tb(err.__traceback__)}.')
+        print(format_error(err))
 
 
-def get_search_parameters():
-    pass
-    # e.g. https://www.rightmove.co.uk/property-to-rent/find.html?searchType=RENT&locationIdentifier=REGION%5E12263&insId=1
-    # &radius=0.0&minPrice=&maxPrice=&minBedrooms=&maxBedrooms=&displayPropertyType=&maxDaysSinceAdded=3&sortByPriceDescending=
-    # &_includeLetAgreed=on&primaryDisplayPropertyType=&secondaryDisplayPropertyType=&oldDisplayPropertyType=&oldPrimaryDisplayPropertyType=
-    # &letType=&letFurnishType=&houseFlatShare=
-    # location identifier (how to get?)
-    # radius (miles) (0, 0.25, 0.5, 1, 3, 5, 10, 15, 20, 30, 40)
-    # min price
-    # max price
-    # min beds
-    # max beds
-    # days since added
+def get_and_list_properties(url):
+    """
+    Gets elements from URL, parses into properties and prints results.
+    Receives a URL as a string.
+    """
+
+    url_to_get = url
+    start_property_num = 1
+    # Iteratively get results until no result pages left
+    while True:
+        html = get_html_from_url(url_to_get)
+        soup_html = BeautifulSoup(html, 'html.parser')
+        properties = get_properties_from_soup_html(soup_html)
+        print_properties(properties, start_property_num)
+
+        next_page_url = get_next_page_url(soup_html)
+        if next_page_url is None:
+            break
+        url_to_get = ZOOPLA_BASE_URL + next_page_url
+        start_property_num += len(properties)
 
 
 def get_html_from_url(url):
@@ -49,36 +66,26 @@ def get_html_from_url(url):
         sys.exit()
 
 
-def get_properties_from_html(html):
+def get_properties_from_soup_html(soup_html):
     """
-    Parses HTML from Rightmove into property results.
-    Receives HTML as bytes; returns properties as a BeautifulSoup resultSet.
+    Parses HTML from Zoopla search results page into property results.
+    Receives HTML as BeautifulSoup object; returns a list of Property objects.
     """
 
-    soup_html = BeautifulSoup(html, 'html.parser')
     # Find all divs with id starting with "property-"
-    soup_results = soup_html.findAll('div', {'id' : lambda L: L and L.startswith('property-')})
-    if len(soup_results) == 0:
+    soup_properties = soup_html.findAll('div', {'data-testid' : 'search-result'})
+    if len(soup_properties) == 0:
         print('No properties found for the provided URL!')
         sys.exit()
-    return soup_results
 
-
-def list_properties(property_results):
-    """
-    Loops through property results and prints details.
-    Receives properties as a BeautifulSoup resultSet.
-    """
-
-    # Loop through results and print details
-    for index, property in enumerate(property_results, start=1):
-        address = get_address(property)
-        title = get_property_type(property)
-        price = get_price(property)
-        added_by_agent = get_added_by_agent(property)
-        if address is not None and title is not None and price is not None:
-            print(f'----------------------------- #{index} -----------------------------')
-            print(f'{title}\n{address}\n{price}\n{added_by_agent}\n')
+    properties = []
+    for soup_property in soup_properties:
+        address = get_address(soup_property)
+        title = get_property_type(soup_property)
+        price = get_price(soup_property)
+        listed_date = get_listed_date(soup_property)
+        properties.append(Property(title, address, price, listed_date))
+    return properties
 
 
 def get_address(property):
@@ -87,10 +94,10 @@ def get_address(property):
     Receives a property as a BeautifulSoup resultSet; returns address as string, or None if not found.
     """
 
-    address = property.find('address')
-    if not address or not address.span or not address.span.text:
+    address = property.find('p', {"data-testid" : "listing-description"})
+    if not address or not address.text:
         return None
-    return address.span.text
+    return address.text
 
 
 def get_property_type(property):
@@ -99,10 +106,10 @@ def get_property_type(property):
     Receives a property as a BeautifulSoup resultSet; returns property type as string, or None if not found.
     """
 
-    property_type = property.find('h2')
+    property_type = property.find('h2', {"data-testid" : "listing-title"})
     if not property_type or not property_type.text:
         return None
-    return property_type.text.replace('\n', '').strip()
+    return property_type.text
 
 
 def get_price(property):
@@ -111,22 +118,42 @@ def get_price(property):
     Receives a property as a BeautifulSoup resultSet; returns price as string, or None if not found.
     """
 
-    price = property.find('span', {'class':'propertyCard-priceValue'})
-    if not price or not price.text:
+    price = property.find('div', {'data-testid' : 'listing-price'})
+    if not price or not price.p or not price.p.text:
         return None
-    return price.text
+    return price.p.text
 
 
-def get_added_by_agent(property):
+def get_listed_date(property):
     """
     Gets the added-by-agent details from a property if exists.
     Receives a property as a BeautifulSoup resultSet; returns added-by-agent details as string, or None if not found.
     """
 
-    added_by_agent = property.find('div', {'class':'propertyCard-branchSummary'})
-    if not added_by_agent or not added_by_agent.text:
+    listed_on = property.find('span', {'data-testid':'date-published'})
+    if not listed_on or not listed_on.text:
         return None
-    return added_by_agent.text.replace('\n', '')
+    return listed_on.text
+
+
+def print_properties(properties, start_property_num=1):
+    """
+    Loops through properties and prints details.
+    Receives properties as a list of Property objects.
+    """
+
+    for property_num, property in enumerate(properties, start=start_property_num):
+        print(f'----------------------------- #{property_num} -----------------------------')
+        print(property.format_details())
+
+
+def get_next_page_url(soup_html):
+    """
+    Gets the next page URL from a Zoopla results page.
+    Receives a webpage as a BeautifulSoup object; returns relative URL as a string (or None if no more results).
+    """
+    
+    return soup_html.find('div', {'data-testid' : 'pagination'}).findAll('a')[-1].get('href')
 
 
 def format_error(err, msg_prefix='An error occurred!'):
@@ -135,7 +162,22 @@ def format_error(err, msg_prefix='An error occurred!'):
     Receives an Exception object and an optional error message prefix string; returns formatted error string.
     """
 
-    return f'{msg_prefix} Details: "{err}", Traceback: {TracebackType.format_tb(err.__traceback__)}.'
+    return f'{msg_prefix} Details: "{err}", Traceback: {traceback.format_tb(err.__traceback__)}.'
+
+
+def get_search_parameters():
+    pass # TODO
+    # e.g. https://www.rightmove.co.uk/property-to-rent/find.html?searchType=RENT&locationIdentifier=REGION%5E12263&insId=1
+    # &radius=0.0&minPrice=&maxPrice=&minBedrooms=&maxBedrooms=&displayPropertyType=&maxDaysSinceAdded=3&sortByPriceDescending=
+    # &_includeLetAgreed=on&primaryDisplayPropertyType=&secondaryDisplayPropertyType=&oldDisplayPropertyType=&oldPrimaryDisplayPropertyType=
+    # &letType=&letFurnishType=&houseFlatShare=
+    # location identifier (how to get?)
+    # radius (miles) (0, 0.25, 0.5, 1, 3, 5, 10, 15, 20, 30, 40)
+    # min price
+    # max price
+    # min beds
+    # max beds
+    # days since added
 
 
 if __name__ == '__main__':
